@@ -3,15 +3,17 @@
 /* eslint-disable no-console */
 
 const { autoUpdater } = require('electron-updater');
-const { app, BrowserWindow, dialog } = require('electron');
+const { app, BrowserWindow, dialog, ipcRenderer } = require('electron');
 const DiscordRPC = require('discord-rpc');
 const https = require('https');
 const fs = require('fs');
 const Zip = require('adm-zip');
 const electron = require('electron');
+const { error } = require('console');
 const clientVersion = app.getVersion();
+const path = require('path');
 
-const dataDir =  (electron.app || electron.remote.app).getPath('userData');
+const dataDir = (electron.app || electron.remote.app).getPath('userData');
 
 console.info('Data directory:', dataDir);
 
@@ -20,7 +22,29 @@ let newVersion = '0.0.0';
 let currentVersion = '0.0.0';
 let windowClosed = false;
 
+const scriptsDir = path.join(dataDir, 'scripts');
+
 let mainWindow;
+
+function createScriptsDir() {
+  if (!fs.existsSync(scriptsDir)) {
+    fs.mkdirSync(scriptsDir);
+  }
+}
+
+createScriptsDir();
+
+function loadScripts() {
+  try {
+    const files = fs.readdirSync(scriptsDir);
+    files.forEach((file) => {
+      const script = fs.readFileSync(path.join(scriptsDir, file)).toString();
+      mainWindow.webContents.executeJavaScript(script);
+    });
+  } catch (e) {
+    console.error(e);
+  }
+}
 
 function createWindow() {
   // Set the Application for Desktop notifications (windows only)
@@ -38,11 +62,11 @@ function createWindow() {
     },
   });
 
+  mainWindow.webContents.debugger.attach('1.1');
   mainWindow.webContents.on('did-finish-load', () => {
-    mainWindow.webContents.executeJavaScript(
-      `(() => { DiscordRichPresence.clientVersion = '${clientVersion}' })()`
-    ).catch(e=>{});
+    mainWindow.webContents.executeJavaScript(`(() => { DiscordRichPresence.clientVersion = '${clientVersion}' })()`).catch((e) => {});
   });
+  loadScripts();
 
   mainWindow.setMenuBarVisibility(false);
   mainWindow.setTitle('PokéClicker');
@@ -55,14 +79,22 @@ function createWindow() {
   }
 
   mainWindow.on('close', (event) => {
-    windowClosed = true
-  })
+    windowClosed = true;
+  });
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
-  mainWindow.on('page-title-updated', function(e) {
-    e.preventDefault()
+  mainWindow.on('page-title-updated', function (e) {
+    e.preventDefault();
   });
+  mainWindow.on('unresponsive', async () => {
+    console.warn('Main window is unresponsive, reloading...');
+  });
+  const base = mainWindow.onerror;
+  mainWindow.onerror = (message, filename, lineno, colno, error) => {
+    console.error(error, message, filename, lineno, colno);
+    base(message, filename, lineno, colno, error);
+  };
 }
 
 function createSecondaryWindow() {
@@ -87,13 +119,13 @@ function createSecondaryWindow() {
   }
 
   newWindow.on('close', (event) => {
-    newWindow = true
-  })
+    newWindow = true;
+  });
   newWindow.on('closed', () => {
     newWindow = null;
   });
-  newWindow.on('page-title-updated', function(e) {
-    e.preventDefault()
+  newWindow.on('page-title-updated', function (e) {
+    e.preventDefault();
   });
   return newWindow;
 }
@@ -113,21 +145,21 @@ app.on('activate', () => {
 /*
 DISCORD STUFF
 */
-    
-const isMainInstance = app.requestSingleInstanceLock()
-    
+
+const isMainInstance = app.requestSingleInstanceLock();
+
 if (!isMainInstance) {
-  app.quit()
+  app.quit();
 } else {
   app.on('second-instance', (event, commandLine, workingDirectory) => {
     // Someone tried to run a second instance, we should focus our window.
     if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore()
-      mainWindow.focus()
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
     }
 
     createSecondaryWindow();
-  })
+  });
 
   // Set this to your Client ID.
   const clientId = '733927271726841887';
@@ -186,66 +218,68 @@ if (!isMainInstance) {
   */
   const isNewerVersion = (version) => {
     return version.localeCompare(currentVersion, undefined, { numeric: true }) === 1;
-  }
+  };
 
   const downloadUpdate = async (initial = false) => {
     const zipFilePath = `${dataDir}/update.zip`;
     const file = fs.createWriteStream(zipFilePath);
-    https.get('https://codeload.github.com/pokeclicker/pokeclicker/zip/master', async res => {
-      let cur = 0;
-      try {
-        if (!initial) await mainWindow.webContents.executeJavaScript(`Notifier.notify({ title: '[UPDATER] v${newVersion}', message: 'Downloading Files...<br/><span id="update-message-progress">Please Wait...</span>', timeout: 1e6 })`);
-      }catch(e){}
+    https
+      .get('https://codeload.github.com/pokeclicker/pokeclicker/zip/master', async (res) => {
+        let cur = 0;
+        try {
+          if (!initial) await mainWindow.webContents.executeJavaScript(`Notifier.notify({ title: '[UPDATER] v${newVersion}', message: 'Downloading Files...<br/><span id="update-message-progress">Please Wait...</span>', timeout: 1e6 })`);
+        } catch (e) {}
 
-      res.on('data', async chunk => {
+        res.on('data', async (chunk) => {
           cur += chunk.length;
           try {
             if (initial) await mainWindow.webContents.executeJavaScript(`setStatus("Downloading Files...<br/>${(cur / 1048576).toFixed(2)} mb")`);
             else await mainWindow.webContents.executeJavaScript(`document.getElementById('update-message-progress').innerText = "${(cur / 1048576).toFixed(2)} mb"`);
-          }catch(e){}
-      });
-
-      res.pipe(file).on('finish', async () => {
-        try {
-          if (initial) await mainWindow.webContents.executeJavaScript('setStatus("Files Downloaded!<br/>Extracting Files...")');
-          else await mainWindow.webContents.executeJavaScript(`Notifier.notify({ title: '[UPDATER] v${newVersion}', message: 'Files Downloaded!<br/>Extracting Files...', timeout: 2e4 })`);
-        }catch(e){}
-
-        const zip = new Zip(zipFilePath);
-
-        const extracted = zip.extractEntryTo('pokeclicker-master/docs/', `${dataDir}`, true, true);
-
-        fs.unlinkSync(zipFilePath);
-
-        if (!extracted) {
-          return downloadUpdateFailed();
-        }
-
-        currentVersion = newVersion;
-        startUpdateCheckInterval();
-
-        // If this is the initial download, don't ask the user about refreshing the page
-        if (initial) {
-          mainWindow.loadURL(`file://${dataDir}/pokeclicker-master/docs/index.html`);
-          return;
-        }
-
-        const userResponse = dialog.showMessageBoxSync(mainWindow, {
-          title: 'PokeClicker - Update success!',
-          message: `Successfully updated,\nwould you like to reload the page now?`,
-          icon: `${__dirname}/icon.png`,
-          buttons: ['Yes', 'No'],
-          noLink: true,
+          } catch (e) {}
         });
 
-        if (userResponse == 0){
-          mainWindow.loadURL(`file://${dataDir}/pokeclicker-master/docs/index.html`);
-        }
+        res.pipe(file).on('finish', async () => {
+          try {
+            if (initial) await mainWindow.webContents.executeJavaScript('setStatus("Files Downloaded!<br/>Extracting Files...")');
+            else await mainWindow.webContents.executeJavaScript(`Notifier.notify({ title: '[UPDATER] v${newVersion}', message: 'Files Downloaded!<br/>Extracting Files...', timeout: 2e4 })`);
+          } catch (e) {}
+
+          const zip = new Zip(zipFilePath);
+
+          const extracted = zip.extractEntryTo('pokeclicker-master/docs/', `${dataDir}`, true, true);
+
+          fs.unlinkSync(zipFilePath);
+
+          if (!extracted) {
+            return downloadUpdateFailed();
+          }
+
+          currentVersion = newVersion;
+          startUpdateCheckInterval();
+
+          // If this is the initial download, don't ask the user about refreshing the page
+          if (initial) {
+            mainWindow.loadURL(`file://${dataDir}/pokeclicker-master/docs/index.html`);
+            return;
+          }
+
+          const userResponse = dialog.showMessageBoxSync(mainWindow, {
+            title: 'PokeClicker - Update success!',
+            message: `Successfully updated,\nwould you like to reload the page now?`,
+            icon: `${__dirname}/icon.png`,
+            buttons: ['Yes', 'No'],
+            noLink: true,
+          });
+
+          if (userResponse == 0) {
+            mainWindow.loadURL(`file://${dataDir}/pokeclicker-master/docs/index.html`);
+          }
+        });
+      })
+      .on('error', (e) => {
+        return downloadUpdateFailed();
       });
-    }).on('error', (e) => {
-      return downloadUpdateFailed();
-    });
-  }
+  };
 
   const downloadUpdateFailed = () => {
     // If client exe updating, return
@@ -263,37 +297,38 @@ if (!isMainInstance) {
     if (userResponse == 0) {
       downloadUpdate();
     }
-  }
+  };
 
   const checkForUpdates = () => {
-    const request = https.get('https://raw.githubusercontent.com/pokeclicker/pokeclicker/master/package.json', res => {
-      let body = '';
+    const request = https
+      .get('https://raw.githubusercontent.com/pokeclicker/pokeclicker/master/package.json', (res) => {
+        let body = '';
 
-      res.on('data', d => {
-        body += d;
+        res.on('data', (d) => {
+          body += d;
+        });
+
+        res.on('end', () => {
+          let data = { version: '0.0.0' };
+          try {
+            data = JSON.parse(body);
+            newVersion = data.version;
+            const newVersionAvailable = isNewerVersion(data.version);
+
+            if (newVersionAvailable) {
+              // Stop checking for updates
+              clearInterval(checkForUpdatesInterval);
+              // Check if user want's to update now
+              shouldUpdateNowCheck();
+            }
+          } catch (e) {}
+        });
+      })
+      .on('error', (e) => {
+        // TODO: Update download failed
+        console.warn("Couldn't check for updated version, might be offline..");
       });
-
-      res.on('end', () => {
-        let data = {version:'0.0.0'};
-        try {
-          data = JSON.parse(body);
-          newVersion = data.version;
-          const newVersionAvailable = isNewerVersion(data.version);
-
-          if (newVersionAvailable) {
-            // Stop checking for updates
-            clearInterval(checkForUpdatesInterval);
-            // Check if user want's to update now
-            shouldUpdateNowCheck();
-          }
-        }catch(e) {}
-      });
-    
-    }).on('error', (e) => {
-      // TODO: Update download failed
-      console.warn('Couldn\'t check for updated version, might be offline..');
-    });
-  }
+  };
 
   const shouldUpdateNowCheck = () => {
     const userResponse = dialog.showMessageBoxSync(mainWindow, {
@@ -303,27 +338,26 @@ if (!isMainInstance) {
       buttons: ['Update Now', 'Remind Me', 'No (disable check)'],
       noLink: true,
     });
-    
+
     switch (userResponse) {
       case 0:
         downloadUpdate();
         break;
       case 1:
         // Check again in 1 hour
-        setTimeout(shouldUpdateNowCheck, 36e5)
+        setTimeout(shouldUpdateNowCheck, 36e5);
         break;
       case 2:
         console.info('Update check disabled, stop checking for updates');
         break;
     }
-  }
+  };
 
   const startUpdateCheckInterval = (run_now = false) => {
     // Check for updates every hour
-    checkForUpdatesInterval = setInterval(checkForUpdates, 36e5)
+    checkForUpdatesInterval = setInterval(checkForUpdates, 36e5);
     if (run_now) checkForUpdates();
-  }
-
+  };
 
   try {
     // If we can get our current version, start checking for updates once the game starts
@@ -331,7 +365,7 @@ if (!isMainInstance) {
     if (currentVersion == '0.0.0') throw Error('Must re-download updated version');
     setTimeout(() => {
       startUpdateCheckInterval(true);
-    }, 1e4)
+    }, 1e4);
   } catch (e) {
     // Game not downloaded yet
     downloadUpdate(true);
@@ -347,7 +381,7 @@ if (!isMainInstance) {
         buttons: ['Restart App Now', 'Later'],
         noLink: true,
       });
-      
+
       switch (userResponse) {
         case 0:
           windowClosed = true;
@@ -355,6 +389,6 @@ if (!isMainInstance) {
           break;
       }
     });
-    autoUpdater.checkForUpdatesAndNotify()
+    autoUpdater.checkForUpdatesAndNotify();
   } catch (e) {}
 }
